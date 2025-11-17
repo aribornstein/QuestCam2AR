@@ -1,147 +1,105 @@
-# QuestCam2AR
+# **Camera-Mapped Reticle Hit-Test System for WebXR**
 
-QuestCam2AR is a WebXR + Meta Spatial SDK prototype that lets you:
+This project implements a **real-time surface reticle** system in WebXR that allows users to point at objects in the physical world **by hovering over a live video panel** instead of using their headset’s actual view direction.
 
-- Run an **immersive AR** experience in the browser (Quest + Meta Browser)
-- Use the **device camera feed** as a texture on in‑world panels
-- Interact with panels via **controller ray / tap**, with hit‑testing and debug overlays
-- Integrate with **Meta Spatial** projects using the files under `metaspatial/`
+In other words:
 
----
+> **You can look at a video feed panel inside VR, move a cursor over it, and the system projects that cursor back into the real room using hit-testing.**
 
-## Project Structure
-
-- [index.html](index.html) — Main HTML entry, host for the WebXR canvas.
-- [src/index.ts](src/index.ts) — App entry point. Creates the [`@iwsdk/core.World`](src/index.ts), configures XR features (anchors, hit/plane/mesh detection, depth, layers), and sets up shared state for panel interactions.
-- [src/panel.ts](src/panel.ts) — Panel registration / system glue (panel entities, registration IDs, etc.).
-- [src/camera-panel-system.ts](src/camera-panel-system.ts) — Applies XR camera frames (via [`CameraSource`](src/index.ts)) to a panel so the panel shows a live camera feed.
-- [src/controller-panel-tap-system.ts](src/controller-panel-tap-system.ts) — Handles controller ray / tap interaction with panels. Uses the shared `tapHitState` from [`src/index.ts`](src/index.ts) to pass UV hit data.
-- [src/tap-hit-debug-system.ts](src/tap-hit-debug-system.ts) — Visual debug of tap hit UVs and rays.
-- [src/robot.ts](src/robot.ts) — Robot behavior / animation system.
-- [src/yolo.ts](src/yolo.ts), [src/yolo-system.ts](src/yolo-system.ts), [src/yolo-worker.ts](src/yolo-worker.ts) — YOLO object‑detection integration (web worker, inference, and ECS wiring).
-- [public/](public/) — Static assets served by Vite:
-  - [public/models/](public/models/) — 3D models.
-  - [public/textures/](public/textures/) — Textures (includes `webxr.png` used as the logo texture in [`src/index.ts`](src/index.ts)).
-  - [public/audio/](public/audio/) — Audio assets.
-  - [public/ui/](public/ui/) — UI textures or layout assets.
-- [ui/](ui/) — UIKitML layouts for Meta Spatial / runtime UI (e.g. [ui/welcome.uikitml](ui/welcome.uikitml)).
-- [metaspatial/](metaspatial/) — Meta Spatial project files:
-  - [metaspatial/components.json](metaspatial/components.json) — Mapping of ECS components to Meta Spatial component names (e.g. `$com.meta.spatial.toolkit.Panel$`, `$Visible$`, `$Quad$`, etc.).
-  - [metaspatial/config.json](metaspatial/config.json) — Project configuration for Meta Spatial integration.
-  - [metaspatial/Composition/](metaspatial/Composition/) — Composition layouts (e.g. `deskLamp`, `robot`, etc.).
-  - `.metaspatial` / `.localsettings` — Meta Spatial project metadata.
+The reticle then snaps to detected real-world surfaces (floor, walls, tables), just like the Meta “flower” demo — but driven by your **panel cursor**, not by your head or controller.
 
 ---
 
-## Features
+## ⭐ **What This Enables**
 
-- **Immersive AR session**
+* A 2D panel becomes a **proxy camera view**, letting you raycast into the real world by hovering over the panel.
+* A continuously updated **ring reticle** sits on whatever real-world surface corresponds to your panel cursor.
+* The reticle **aligns to the surface normal**, not just position.
+* The system keeps working while VR users move around.
+* It functions as a **live calibration layer** between:
 
-  [`World.create`](src/index.ts) is called with:
+  * the Quest camera feed,
+  * the panel display,
+  * and WebXR’s world-space hit test surfaces.
 
-  - `sessionMode: ImmersiveAR`
-  - XR features: anchors, hit test, plane + mesh detection, layers, optional depth sensing
-
-- **Scene understanding**
-
-  [`SceneUnderstandingSystem`](src/index.ts) is registered so you can work with `$XRPlane$`, `$XRMesh$`, and `$XRAnchor$` entities.
-
-- **Camera panel**
-
-  - A `CameraSource` component is added on a `cameraEntity` with `$1920\times1080$` resolution and `$30$ fps`.
-  - [`CameraPanelSystem`](src/camera-panel-system.ts) uses this to render the XR camera feed onto a panel.
-
-- **Panel interaction**
-
-  - Shared state in [`src/index.ts`](src/index.ts):
-
-    ```ts
-    const tapHitState = {
-      lastTapUv: null as { u: number; v: number } | null,
-      pendingRayUv: null as { u: number; v: number } | null,
-    };
-    ```
-
-  - [`ControllerPanelTapSystem`](src/controller-panel-tap-system.ts) writes UV hit data into this state.
-  - [`TapHitDebugSystem`](src/tap-hit-debug-system.ts) reads `pendingRayUv` to visualize hits.
-
-- **Meta Spatial components**
-
-  - Components defined in [metaspatial/components.json](metaspatial/components.json) (e.g. `$com.meta.spatial.toolkit.Panel$`, `$Visible$`, `$Quad$`) correspond to ECS components used by the runtime and are intended to be consumed by Meta Spatial tooling.
+This creates a **real-time manifold** where each pixel on the panel corresponds to a direction in physical space.
 
 ---
 
-## Getting Started
+## 🧩 **Why This Was Built**
 
-### Prerequisites
+Most examples (Unity/ARKit/Meta Samples) rely on the device's true “view center” to perform hit-testing.
+But this project required something different:
 
-- Node.js (LTS recommended)
-- npm or yarn
-- A WebXR‑capable browser (Meta Browser on Quest for AR)
-- Enabled experimental / WebXR flags if required
+> **Hit-testing based on arbitrary UV coordinates on a virtual panel showing the headset’s camera feed.**
 
-### Install
+This is *not* provided by WebXR — we had to construct it manually by:
 
-```sh
-npm install
-```
+1. Letterboxing the camera feed into a square panel (maintaining aspect ratio).
+2. Mapping panel UV → camera UV → clip space → world ray.
+3. Transforming that ray into viewer space for XRHitTestSource.
+4. Snapping a custom reticle mesh to the hit pose.
 
-### Run in Dev Mode
-
-```sh
-npm run dev
-```
-
-Then:
-
-1. Open the printed URL in a desktop browser for quick iteration.
-2. For AR, open the same URL in the **Meta Browser** on your Quest (ensure your dev machine is reachable on the network).
-
-### Build for Production
-
-```sh
-npm run build
-npm run preview
-```
+The result is a fully working **panel → room ray mapping pipeline**.
 
 ---
 
-## Meta Spatial Integration
+## ⚙️ **Key Components**
 
-The [metaspatial/](metaspatial/) folder is structured to work with Meta Spatial:
+### **CameraPanelSystem**
 
-- Place / configure your Meta Spatial project files in [metaspatial/](metaspatial/).
-- The component mapping in [metaspatial/components.json](metaspatial/components.json) must stay in sync with your ECS components.
-- Generated component XMLs (if you use the generation pipeline described in [metaspatial/README.md](metaspatial/README.md)) should be referenced by your Meta Spatial project and should align with assets under [public/](public/).
+* Renders the live camera feed onto a head-locked panel.
+* Preserves aspect ratio using letterboxing (“A2 mode”).
+* Emits mapping data (offsets, crop, dimensions) for ray reconstruction.
 
----
+### **ControllerPanelTapSystem**
 
-## Development Notes
+* Tracks controller ray intersection with the panel.
+* Outputs continuous hover UV coordinates.
+* Feeds these UVs into the hit-test system every frame.
 
-- Global references exposed on the `world` instance:
+### **TapHitDebugSystem (Reticle Version)**
 
-  ```ts
-  const worldAny = world as any;
-  worldAny.globals = {
-    cameraEntity,
-    tapHitState,
-    panelHoverUv: null,
-    pendingPanelHitPointRef: null,
-  };
-  ```
-
-  These are consumed by systems such as [`CameraPanelSystem`](src/camera-panel-system.ts) and [`ControllerPanelTapSystem`](src/controller-panel-tap-system.ts).
-
-- The root camera is positioned at $(0, 1, 0.5)$ in world space for a comfortable default eye height:
-
-  ```ts
-  const { camera } = world;
-  camera.position.set(0, 1, 0.5);
-  ```
+* Converts panel UV → camera UV → NDC → world ray.
+* Performs real WebXR hit tests using XRRay.
+* Snaps a flat ring reticle onto real detected planes.
+* Falls back to ray direction if hit tests fail.
 
 ---
 
-## License
+## 🎯 **Current Goal**
 
-Add your license information here (e.g. MIT, proprietary, etc.).
+Visually validate how accurately the panel cursor maps into real-world surfaces, and analyze where small systematic mismatches occur.
+This will be used for:
 
+* automated calibration,
+* YOLO bounding-box projection,
+* object selection via panel UI.
+
+The reticle visualization makes it easy to see misalignment in real time.
+
+---
+
+## 🚀 **Future Extensions**
+
+* Full YOLO integration for object detection based on panel clicks.
+* Automatic calibration via regression fitting.
+* QR/apriltag-based alignment (optional).
+* Multi-camera stitching.
+
+---
+
+## 🧪 **Demo Behavior**
+
+* Move the controller ray over the camera panel.
+* Watch a blue ring reticle snap to the corresponding point in the real room.
+* Move the controller → reticle continuously moves over actual surfaces.
+
+If the reticle feels “off”, adjust calibration values or consider adding a mini training phase.
+
+---
+
+## 📝 **Status**
+
+**Working prototype – reticle alignment mostly correct, testing ongoing.**
+The system is functional enough to evaluate projection quality but it needs to be fixed the mapping isn't good enough.
