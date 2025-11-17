@@ -4,12 +4,12 @@
 //   panel pixels -> camera image UV (A2 letterbox) ->
 //   NDC -> world ray -> viewer-space hit-test.
 //
-// Instead of an orb, we use a flat reticle (ring) that:
+// Uses a flat reticle (ring) that:
 //   - snaps to the hit-test pose (position + orientation),
 //   - is slightly offset along the surface normal to avoid z-fighting,
 //   - falls back to a point along the ray if there is no hit.
 //
-// This is meant for continuous "manifold scanning" as you hover over the panel.
+// Designed to work with continuous "manifold scanning" as you hover over the panel.
 
 import { createSystem } from "@iwsdk/core";
 import * as THREE from "three";
@@ -50,6 +50,11 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
   private pendingRayRef: { origin: THREE.Vector3; dir: THREE.Vector3 } | null =
     null;
   private timeSinceTap = 0;
+
+  // Rotate RingGeometry's +Z normal to +Y (WebXR surface normal)
+  private readonly reticlePreRot = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ"),
+  );
 
   // ---------------- XR spaces ----------------
 
@@ -98,34 +103,33 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
     this.reticle.name = "TapHitReticle";
     this.reticle.visible = false;
 
-    // Use matrixAutoUpdate so we can copy matrices from XR poses
+    // We'll drive the matrix ourselves
     this.reticle.matrixAutoUpdate = false;
 
     scene.add(this.reticle);
   }
 
-  private placeReticleAtPoseMatrix(pose: XRRigidTransform) {
+  private placeReticleAtPoseMatrix(poseTransform: XRRigidTransform) {
     if (!this.reticle) return;
 
-    const m = new THREE.Matrix4().fromArray(pose.matrix);
-    this.reticle.matrix.copy(m);
+    const poseMat = new THREE.Matrix4().fromArray(poseTransform.matrix);
 
-    // Decompose to get orientation so we can offset along the surface normal
     const pos = new THREE.Vector3();
     const quat = new THREE.Quaternion();
     const scale = new THREE.Vector3();
-    this.reticle.matrix.decompose(pos, quat, scale);
+    poseMat.decompose(pos, quat, scale);
 
-    // XR hit-test plane "up" is usually the local +Y axis of the pose
+    // Rotate reticle so its local +Z (geometry normal) becomes +Y (surface normal)
+    quat.multiply(this.reticlePreRot);
+
+    // Compute final surface normal from adjusted quaternion
     const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(quat).normalize();
     pos.addScaledVector(normal, RETICLE_Z_OFFSET);
 
-    // Recompose matrix with offset position
     this.reticle.position.copy(pos);
     this.reticle.quaternion.copy(quat);
     this.reticle.scale.copy(scale);
     this.reticle.updateMatrix();
-
     this.reticle.visible = true;
   }
 
@@ -197,7 +201,6 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
       if (results.length) {
         const pose = results[0].getPose(refSpace);
         if (pose) {
-          // Snap reticle to the full pose (position + orientation)
           this.placeReticleAtPoseMatrix(pose.transform);
         }
 
@@ -347,9 +350,6 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
         space: viewerSpace,
         offsetRay: xrRay,
       });
-
-      // We don't log every frame to avoid spam; uncomment if you want:
-      // console.log("[YOLO HIT DEBUG] created hit-test source for camera-ray");
     } catch (e) {
       console.warn("[YOLO HIT DEBUG] requestHitTestSource failed; fallback", e);
       this.placeReticleFallback(originRef, dirRef);
