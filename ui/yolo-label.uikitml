@@ -1,0 +1,29 @@
+<style>
+  .yolo-label-root {
+    padding: 4px 8px;
+    border-radius: 8px;
+    background-color: rgba(0, 0, 0, 0.75);
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .yolo-label-text {
+    color: white;
+    font-size: 18px;
+  }
+
+  .yolo-label-score {
+    color: #a3e635; /* lime-ish */
+    font-size: 14px;
+  }
+</style>
+
+<Panel class="yolo-label-root">
+  <text id="yolo-label-text" class="yolo-label-text">
+    object
+  </text>
+  <text id="yolo-label-score" class="yolo-label-score">
+    100%
+  </text>
+</Panel>

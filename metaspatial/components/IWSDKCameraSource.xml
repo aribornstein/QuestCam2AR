@@ -1,0 +1,10 @@
+<ComponentSchema packageName="com.iwsdk.components">
+  <Component name="CameraSource" description="Camera video source with texture output">
+    <StringAttribute name="deviceId" defaultValue=""/>
+    <StringAttribute name="facing" defaultValue="back"/>
+    <IntAttribute name="width" defaultValue="1920"/>
+    <IntAttribute name="height" defaultValue="1080"/>
+    <IntAttribute name="frameRate" defaultValue="30"/>
+    <StringAttribute name="state" defaultValue="[object Object]"/>
+  </Component>
+</ComponentSchema>
