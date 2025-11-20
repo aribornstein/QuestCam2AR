@@ -30,14 +30,73 @@ const tapHitState = {
   pendingRayUv: null as { u: number; v: number } | null, // consumed by TapHitDebugSystem
 };
 
+type CameraExtrinsics = {
+  lensTranslation: { x: number; y: number; z: number };
+  lensRotation: { x: number; y: number; z: number; w: number };
+} | null;
+
+/**
+ * Query Quest camera extrinsics once, using getUserMedia.
+ * We immediately stop the stream; we only need the settings.
+ */
+async function queryQuestCameraExtrinsics(): Promise<CameraExtrinsics> {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    console.warn("[Intrinsics] mediaDevices.getUserMedia not available");
+    return null;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { exact: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 1080 },
+      },
+    });
+
+    const track = stream.getVideoTracks()[0];
+    const settings: any = track.getSettings();
+    console.log("[Intrinsics] raw track settings:", settings);
+
+    // Clean up stream immediately – we only need settings
+    track.stop();
+    stream.getTracks().forEach((t) => t.stop());
+
+    if (!settings.lensTranslation || !settings.lensRotation) {
+      console.warn(
+        "[Intrinsics] Missing lensTranslation / lensRotation on settings",
+      );
+      return null;
+    }
+
+    const lt = settings.lensTranslation as DOMPointReadOnly;
+    const lr = settings.lensRotation as DOMPointReadOnly;
+
+    const extrinsics: CameraExtrinsics = {
+      lensTranslation: { x: lt.x, y: lt.y, z: lt.z },
+      lensRotation: { x: lr.x, y: lr.y, z: lr.z, w: lr.w },
+    };
+
+    console.log("[Intrinsics] parsed extrinsics:", extrinsics);
+    return extrinsics;
+  } catch (e) {
+    console.warn("[Intrinsics] Failed to query camera extrinsics", e);
+    return null;
+  }
+}
+
 async function main() {
   try {
+    // Just to warm up IWS camera permissions
     try {
       await CameraUtils.getDevices();
       console.log("[Camera] Devices ready");
     } catch (err) {
       console.warn("[Camera] Devices unavailable", err);
     }
+
+    // 1) Ask Quest for lens pose once
+    const cameraExtrinsics = await queryQuestCameraExtrinsics();
 
     const assets: AssetManifest = {
       webxr: {
@@ -70,7 +129,7 @@ async function main() {
         features: {
           sceneUnderstanding: true,
           camera: true,
-          spatialUI: {},      // pointer / controller rays
+          spatialUI: {}, // pointer / controller rays
           locomotion: false,
           grabbing: true,
           physics: true,
@@ -98,6 +157,8 @@ async function main() {
       tapHitState,
       panelHoverUv: null,
       pendingPanelHitPointRef: null,
+      cameraImageMapping: null,
+      cameraExtrinsics, // <--- NEW: lens pose from getUserMedia
     };
 
     const tex = AssetManager.getTexture("webxr")!;
@@ -128,10 +189,12 @@ async function main() {
       .registerSystem(CameraPanelSystem)
       .registerSystem(ControllerPanelTapSystem)
 
-      // (panel hit point) -> world ray -> hit-test -> 3D orb
+      // Panel UV -> camera UV -> ray -> hit-test -> reticle
       .registerSystem(TapHitDebugSystem);
 
-    console.log("World created. CameraPanelSystem + ControllerPanelTapSystem + TapHitDebugSystem ready.");
+    console.log(
+      "World created. CameraPanelSystem + ControllerPanelTapSystem + TapHitDebugSystem ready.",
+    );
   } catch (e) {
     console.error("Fatal init error", e);
   }

@@ -1,15 +1,13 @@
 // tap-hit-debug-system.ts
 //
 // Panel UV (from ControllerPanelTapSystem hover) ->
-//   panel pixels -> camera image UV (A2 letterbox) ->
+//   panel pixels -> image UV (1:1) ->
 //   NDC -> world ray -> viewer-space hit-test.
 //
-// Uses a flat reticle (ring) that:
+// Renders a flat reticle (ring) that:
 //   - snaps to the hit-test pose (position + orientation),
 //   - is slightly offset along the surface normal to avoid z-fighting,
 //   - falls back to a point along the ray if there is no hit.
-//
-// Designed to work with continuous "manifold scanning" as you hover over the panel.
 
 import { createSystem } from "@iwsdk/core";
 import * as THREE from "three";
@@ -30,10 +28,6 @@ type CameraImageMapping = {
   srcH: number;
   panelW: number;
   panelH: number;
-  renderW: number;
-  renderH: number;
-  offsetX: number;
-  offsetY: number;
 } | null;
 
 type Spaces = {
@@ -140,11 +134,14 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
 
     // Orient reticle so its normal roughly faces the ray direction
     const normal = dir.clone().normalize();
-    const up = Math.abs(normal.y) > 0.9
-      ? new THREE.Vector3(1, 0, 0)
-      : new THREE.Vector3(0, 1, 0);
+    const up =
+      Math.abs(normal.y) > 0.9
+        ? new THREE.Vector3(1, 0, 0)
+        : new THREE.Vector3(0, 1, 0);
     const tangent = new THREE.Vector3().crossVectors(up, normal).normalize();
-    const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize();
+    const bitangent = new THREE.Vector3()
+      .crossVectors(normal, tangent)
+      .normalize();
 
     const m = new THREE.Matrix4().makeBasis(tangent, normal, bitangent);
     m.setPosition(pos);
@@ -238,28 +235,15 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
     const { u, v } = tapState.pendingRayUv;
     tapState.pendingRayUv = null; // consume this sample
 
-    const {
-      srcW,
-      srcH,
-      panelW,
-      panelH,
-      renderW,
-      renderH,
-      offsetX,
-      offsetY,
-    } = mapping;
+    const { panelW, panelH } = mapping;
 
     // Panel UV -> panel pixels
     const px = u * panelW;
     const py = v * panelH;
 
-    // Map into the letterboxed camera region
-    const camU = (px - offsetX) / renderW;
-    const camV = (py - offsetY) / renderH;
-
-    // Raw image UV
-    let uImg = camU;
-    let vImg = camV;
+    // Simple: panel pixels map 1:1 to camera image pixels
+    let uImg = px / panelW;
+    let vImg = py / panelH;
 
     // Optional calibration layer (currently identity)
     const CALIB_OFFSET_X = 0.0;
@@ -288,10 +272,6 @@ export class TapHitDebugSystem extends createSystem({}, {}) {
 
     this.pendingRayRef = { origin: originRef.clone(), dir: dirRef.clone() };
     this.timeSinceTap = 0;
-
-    const fallbackPos = originRef
-      .clone()
-      .add(dirRef.clone().multiplyScalar(FALLBACK_DISTANCE));
 
     console.log(
       "[YOLO HIT DEBUG] hover panel uv:",
