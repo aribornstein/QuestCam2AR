@@ -1,10 +1,4 @@
 // camera-panel-system.ts
-//
-// Head-locked camera panel that shows the camera feed with NO letterboxing.
-// Exports a simple cameraImageMapping used by TapHitDebugSystem.
-//
-// Panel is a small “tablet” in front of your head, with the same aspect ratio
-// as the camera frame (1280x1080).
 
 import { createSystem, CameraUtils } from "@iwsdk/core";
 import * as THREE from "three";
@@ -16,13 +10,10 @@ type TapHitState = {
 
 type HoverUv = { u: number; v: number } | null;
 
-// Match the camera frame aspect 1280x1080
-const PANEL_W = 1280;
-const PANEL_H = 1080;
-
-// Physical size in meters (height). Width scales by aspect.
-const PANEL_HEIGHT_M = 0.6;
-const PANEL_DISTANCE = 1.0;
+const PANEL_W = 1280; // panel rendering width (px)
+const PANEL_H = 1280; // panel rendering height (px, square texture)
+const PANEL_SIZE_M = 0.6; // physical size in meters
+const PANEL_DISTANCE = 1.0; // distance in front of head
 
 export class CameraPanelSystem extends createSystem({}, {}) {
   private panelMesh: THREE.Mesh | null = null;
@@ -36,47 +27,26 @@ export class CameraPanelSystem extends createSystem({}, {}) {
     const camera = this.camera as THREE.PerspectiveCamera;
     if (!camera) return;
 
-    // Canvas with same aspect ratio as the camera frame
     this.canvas = document.createElement("canvas");
     this.canvas.width = PANEL_W;
     this.canvas.height = PANEL_H;
 
     this.ctx = this.canvas.getContext("2d");
-    if (!this.ctx) {
-      console.warn("[CameraPanelSystem] Failed to get 2D context");
-      this.canvas = null;
-      return;
-    }
+    if (!this.ctx) throw new Error("canvas 2D context failed");
 
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.needsUpdate = true;
 
-    const aspect = PANEL_W / PANEL_H;
-    const panelWidthM = PANEL_HEIGHT_M * aspect;
-    const panelHeightM = PANEL_HEIGHT_M;
-
-    const geo = new THREE.PlaneGeometry(panelWidthM, panelHeightM);
-    const mat = new THREE.MeshBasicMaterial({
-      map: this.texture,
-      transparent: true,
-      opacity: 0.95,
-    });
+    const geo = new THREE.PlaneGeometry(PANEL_SIZE_M, PANEL_SIZE_M);
+    const mat = new THREE.MeshBasicMaterial({ map: this.texture });
 
     this.panelMesh = new THREE.Mesh(geo, mat);
     this.panelMesh.name = "CameraPanel";
 
-    // Head-locked: attach to XR camera
     camera.add(this.panelMesh);
     this.panelMesh.position.set(0, 0, -PANEL_DISTANCE);
 
-    console.log(
-      "[CameraPanelSystem] Created head-locked panel | size (m):",
-      panelWidthM.toFixed(3),
-      "x",
-      panelHeightM.toFixed(3),
-      "| distance:",
-      PANEL_DISTANCE,
-    );
+    console.log("[CameraPanelSystem] Created head-locked panel");
   }
 
   update(dt: number, time: number) {
@@ -88,36 +58,68 @@ export class CameraPanelSystem extends createSystem({}, {}) {
     const tapState: TapHitState | undefined = globals.tapHitState;
     const hoverUv: HoverUv = globals.panelHoverUv ?? null;
 
-    // Get camera frame from Immersive Web SDK
+    // Get camera frame
     const cameraEntity = globals.cameraEntity;
     if (!cameraEntity) return;
 
     const frameCanvas: HTMLCanvasElement | null =
       CameraUtils.captureFrame?.(cameraEntity) ?? null;
-
     if (!frameCanvas) return;
 
     const srcW = frameCanvas.width;
     const srcH = frameCanvas.height;
     if (!srcW || !srcH) return;
 
-    const dstW = this.canvas.width;
-    const dstH = this.canvas.height;
+    // Maintain aspect ratio: letterbox into square texture
+    const dstW = PANEL_W;
+    const dstH = PANEL_H;
 
-    // Simple: draw full frame into full panel canvas, no letterbox/crop
+    const srcAR = srcW / srcH;
+    const dstAR = dstW / dstH;
+
+    let renderW = 0;
+    let renderH = 0;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (srcAR > dstAR) {
+      // Wider than square → full width, reduced height
+      renderW = dstW;
+      renderH = Math.round(dstW / srcAR);
+      offsetY = Math.floor((dstH - renderH) / 2);
+    } else {
+      // Taller → full height, reduced width
+      renderH = dstH;
+      renderW = Math.round(dstH * srcAR);
+      offsetX = Math.floor((dstW - renderW) / 2);
+    }
+
     this.ctx.clearRect(0, 0, dstW, dstH);
-    this.ctx.drawImage(frameCanvas, 0, 0, srcW, srcH, 0, 0, dstW, dstH);
+    this.ctx.drawImage(
+      frameCanvas,
+      0,
+      0,
+      srcW,
+      srcH,
+      offsetX,
+      offsetY,
+      renderW,
+      renderH,
+    );
 
-    // Export simple mapping for TapHitDebugSystem:
-    // panel UV -> panel pixels -> image UV (1:1)
+    // Export mapping for TapHitDebugSystem
     globals.cameraImageMapping = {
       srcW,
       srcH,
       panelW: dstW,
       panelH: dstH,
+      renderW,
+      renderH,
+      offsetX,
+      offsetY,
     };
 
-    // Hover cursor (for visual feedback)
+    // Hover cursor (for debugging)
     if (hoverUv) {
       const x = hoverUv.u * dstW;
       const y = hoverUv.v * dstH;
@@ -129,13 +131,13 @@ export class CameraPanelSystem extends createSystem({}, {}) {
       this.ctx.stroke();
     }
 
-    // Tap dot (when user "clicks" the panel)
+    // Tap dot (optional)
     if (tapState?.lastTapUv) {
       const x = tapState.lastTapUv.u * dstW;
       const y = tapState.lastTapUv.v * dstH;
 
       this.ctx.beginPath();
-      this.ctx.arc(x, y, 10, 0, Math.PI * 2);
+      this.ctx.arc(x, y, 12, 0, Math.PI * 2);
       this.ctx.fillStyle = "#00aaff";
       this.ctx.fill();
     }

@@ -1,11 +1,8 @@
 // controller-panel-tap-system.ts
 //
-// Uses the RIGHT controller ray to hover & click on the CameraPanel.
-// Hover:
-//   - updates globals.panelHoverUv
-//   - updates tapHitState.pendingRayUv (drives TapHitDebugSystem reticle)
-// Click (button 0):
-//   - updates tapHitState.lastTapUv (solid dot)
+// Uses XR controller rays to "hover" / "click" on the CameraPanel.
+// Right-hand controller only controls the reticle.
+// Hover updates panelHoverUv + pendingRayUv every frame for manifold scanning.
 
 import { createSystem } from "@iwsdk/core";
 import * as THREE from "three";
@@ -14,6 +11,12 @@ type TapHitState = {
   lastTapUv: { u: number; v: number } | null;
   pendingRayUv: { u: number; v: number } | null;
 };
+
+type PanelHitPointRef = {
+  x: number;
+  y: number;
+  z: number;
+} | null;
 
 export class ControllerPanelTapSystem extends createSystem({}, {}) {
   private raycaster = new THREE.Raycaster();
@@ -30,20 +33,22 @@ export class ControllerPanelTapSystem extends createSystem({}, {}) {
     const refSpace: XRReferenceSpace | null =
       xrMgr.getReferenceSpace?.() ?? null;
 
-    if (!session || !frame || !refSpace) {
-      return;
-    }
+    if (!session || !frame || !refSpace) return;
 
     const scene = this.scene as THREE.Scene;
     const panel = scene.getObjectByName("CameraPanel") as THREE.Mesh | null;
     if (!panel) return;
 
     let hoverUv: { u: number; v: number } | null = null;
+    let pendingPanelHitPointRef: PanelHitPointRef = null;
 
     for (const inputSource of session.inputSources) {
-      // Only use right-hand tracked-pointer controllers
       if (inputSource.targetRayMode !== "tracked-pointer") continue;
-      if (inputSource.handedness !== "right") continue;
+
+      // Only let the RIGHT controller drive the cursor
+      if (inputSource.handedness && inputSource.handedness !== "right") {
+        continue;
+      }
 
       const targetRaySpace = inputSource.targetRaySpace;
       if (!targetRaySpace) continue;
@@ -56,7 +61,6 @@ export class ControllerPanelTapSystem extends createSystem({}, {}) {
 
       const origin = new THREE.Vector3(pos.x, pos.y, pos.z);
       const quat = new THREE.Quaternion(ori.x, ori.y, ori.z, ori.w);
-
       const direction = new THREE.Vector3(0, 0, -1)
         .applyQuaternion(quat)
         .normalize();
@@ -73,20 +77,21 @@ export class ControllerPanelTapSystem extends createSystem({}, {}) {
 
       if (hovering) {
         const hit = hits[0];
-
         if (hit.uv) {
-          // hit.uv.y is from bottom in Three, so flip so (0,0) is top-left
           const u = hit.uv.x;
-          const v = 1 - hit.uv.y;
+          const v = 1 - hit.uv.y; // (0,0) = top-left
 
           hoverUv = { u, v };
 
-          // Continuous hover drives the reticle ray
+          // Continuous manifold scanning: always feed pendingRayUv
           tapState.pendingRayUv = { u, v };
 
-          // Click: rising edge of button 0 while hovering
+          // Optional click semantics (for a solid dot on the panel)
           if (pressed && !prev) {
             tapState.lastTapUv = { u, v };
+
+            const p = hit.point;
+            pendingPanelHitPointRef = { x: p.x, y: p.y, z: p.z };
 
             console.log(
               "[ControllerPanelTap] click on panel uv:",
@@ -101,5 +106,8 @@ export class ControllerPanelTapSystem extends createSystem({}, {}) {
     }
 
     globals.panelHoverUv = hoverUv;
+    if (pendingPanelHitPointRef) {
+      globals.pendingPanelHitPointRef = pendingPanelHitPointRef;
+    }
   }
 }
