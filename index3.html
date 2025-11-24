@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WebXR Two-Panel Portal Hit-Test Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #000;
+      color: #fff;
+    }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 12px;
+      border-radius: 4px;
+      z-index: 10;
+      font-size: 12px;
+      max-width: 320px;
+    }
+    #cameraVideo {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      width: 240px;
+      border: 2px solid white;
+      z-index: 5;
+    }
+    #cameraSelect {
+      margin-top: 6px;
+      width: 260px;
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="info">
+    <div><b>Two-Panel Camera Portal + Hit-Test Demo</b></div>
+    <div>1. Put Quest in dev mode & open this page in Quest Browser.</div>
+    <div>2. Pick a back camera, then tap "Enter AR".</div>
+    <div>3. Use the <b>right controller</b> ray to scan the small panel.</div>
+    <div>4. Reticle shows hit-test point behind that pixel in world space.</div>
+
+    <label for="cameraSelect">Camera:</label><br/>
+    <select id="cameraSelect">
+      <option value="">Loading cameras...</option>
+    </select>
+  </div>
+
+  <video id="cameraVideo" autoplay playsinline muted></video>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { ARButton } from "three/addons/webxr/ARButton.js";
+    import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
+
+    // === Calibration knobs ===
+    const CAL_HFOV      = 1.0;
+    const CAL_VFOV      = 1.0;
+    const CAL_U_OFFSET  = 0.0;
+    const CAL_V_OFFSET  = 0.0;
+
+    let renderer, scene;
+    let nonXRCamera;
+    let headLockedGroup;
+    let bigPanelMesh;
+    let bigPanelWidth = 3;
+    let bigPanelHeight = 2;
+    let panelDistance = 1.5;
+    let smallPanelMesh;
+
+    let videoTexture;
+    let videoEl;
+    let cameraSelect;
+    let currentStream = null;
+
+    let xrSession = null;
+    let viewerSpace = null;
+    let localSpace = null;
+    let hitTestSource = null;
+    let lastRay = null;
+
+    let reticle;
+    let controllerRight, controllerGripRight;
+    const raycaster = new THREE.Raycaster();
+    const tempMatrix = new THREE.Matrix4();
+    let panelHoverMarker = null;
+
+    const _camWorldPos = new THREE.Vector3();
+    const _bigLocalPoint = new THREE.Vector3();
+    const _bigWorldPoint = new THREE.Vector3();
+    const _dirWorld = new THREE.Vector3();
+    const _dirViewer = new THREE.Vector3();
+    const _viewerQuat = new THREE.Quaternion();
+
+    const lastRayDirWorld = new THREE.Vector3();
+    let hasLastRayDirWorld = false;
+    const _hitPos = new THREE.Vector3();
+    const _camPosForHit = new THREE.Vector3();
+
+    init();
+
+    async function init() {
+      videoEl = document.getElementById("cameraVideo");
+      cameraSelect = document.getElementById("cameraSelect");
+
+      scene = new THREE.Scene();
+
+      nonXRCamera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.01,
+        100
+      );
+      nonXRCamera.position.set(0, 1.6, 3);
+
+      const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+      hemi.position.set(0, 20, 0);
+      scene.add(hemi);
+
+      const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+      dir.position.set(3, 10, 10);
+      scene.add(dir);
+
+      headLockedGroup = new THREE.Group();
+      scene.add(headLockedGroup);
+
+      videoTexture = new THREE.VideoTexture(videoEl);
+      videoTexture.minFilter = THREE.LinearFilter;
+      videoTexture.magFilter = THREE.LinearFilter;
+      videoTexture.format = THREE.RGBAFormat;
+      videoTexture.flipY = false;
+      videoTexture.needsUpdate = true;
+
+      // Big head-locked panel
+      const bigGeo = new THREE.PlaneGeometry(bigPanelWidth, bigPanelHeight);
+      const bigMat = new THREE.MeshBasicMaterial({
+        map: videoTexture,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.0,
+        depthWrite: false,
+      });
+      bigPanelMesh = new THREE.Mesh(bigGeo, bigMat);
+      bigPanelMesh.position.set(0, 0, -panelDistance);
+      headLockedGroup.add(bigPanelMesh);
+
+      // Small panel: NOW world-locked (parent = scene)
+      const smallScale = 0.35;
+      const smallWidth = bigPanelWidth * smallScale;
+      const smallHeight = bigPanelHeight * smallScale;
+
+      const smallGeo = new THREE.PlaneGeometry(smallWidth, smallHeight);
+      const smallMat = new THREE.MeshBasicMaterial({
+        map: videoTexture,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.95,
+      });
+      smallPanelMesh = new THREE.Mesh(smallGeo, smallMat);
+      // Fallback position for non-XR or before sessionstart
+      smallPanelMesh.position.set(0, -0.3, -1.0);
+      smallPanelMesh.scale.y = -1;
+      smallPanelMesh.updateMatrix();
+      scene.add(smallPanelMesh);
+
+      const markerGeo = new THREE.CircleGeometry(0.02, 32);
+      const markerMat = new THREE.MeshBasicMaterial({
+        color: 0x00aaff,
+        transparent: true,
+        opacity: 0.9,
+      });
+      panelHoverMarker = new THREE.Mesh(markerGeo, markerMat);
+      panelHoverMarker.visible = false;
+      smallPanelMesh.add(panelHoverMarker);
+
+      const ringGeom = new THREE.RingGeometry(0.035, 0.055, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x00ff00,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+      });
+      reticle = new THREE.Mesh(ringGeom, ringMat);
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      const arButton = ARButton.createButton(renderer, {
+        requiredFeatures: ["hit-test"],
+        optionalFeatures: ["hand-tracking", "anchors"],
+      });
+      document.body.appendChild(arButton);
+
+      setupControllers();
+      window.addEventListener("resize", onWindowResize);
+
+      await setupCameraList();
+
+      cameraSelect.addEventListener("change", async () => {
+        const deviceId = cameraSelect.value;
+        if (deviceId && renderer.xr.isPresenting) {
+          await startCamera(deviceId);
+        }
+      });
+
+      renderer.xr.addEventListener("sessionstart", onXRSessionStart);
+      renderer.xr.addEventListener("sessionend", onXRSessionEnd);
+
+      animate();
+    }
+
+    function setupControllers() {
+      const controllerModelFactory = new XRControllerModelFactory();
+
+      controllerRight = renderer.xr.getController(0);
+      scene.add(controllerRight);
+
+      controllerGripRight = renderer.xr.getControllerGrip(0);
+      controllerGripRight.add(
+        controllerModelFactory.createControllerModel(controllerGripRight),
+      );
+      scene.add(controllerGripRight);
+
+      const rayGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -1),
+      ]);
+      const rayLine = new THREE.Line(rayGeo);
+      rayLine.scale.z = 5;
+      controllerRight.add(rayLine);
+
+      const controllerLeft = renderer.xr.getController(1);
+      scene.add(controllerLeft);
+      const controllerGripLeft = renderer.xr.getControllerGrip(1);
+      controllerGripLeft.add(
+        controllerModelFactory.createControllerModel(controllerGripLeft),
+      );
+      scene.add(controllerGripLeft);
+    }
+
+    async function setupCameraList() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter((d) => d.kind === "videoinput");
+        const backKeywords = ["back", "rear", "environment", "world"];
+        const backCams = videoDevices.filter((d) => {
+          const label = d.label.toLowerCase();
+          return backKeywords.some((kw) => label.includes(kw));
+        });
+
+        cameraSelect.innerHTML = "";
+
+        if (backCams.length === 0) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.text = "No back-facing cameras found";
+          cameraSelect.appendChild(opt);
+          console.warn("No back-facing cameras detected");
+          return;
+        }
+
+        backCams.forEach((device, i) => {
+          const opt = document.createElement("option");
+          opt.value = device.deviceId;
+          opt.text = device.label || `Back Camera ${i + 1}`;
+          cameraSelect.appendChild(opt);
+        });
+
+        if (backCams.length >= 2) {
+          cameraSelect.selectedIndex = 1;
+        }
+
+      } catch (err) {
+        console.error("Error enumerating cameras:", err);
+        cameraSelect.innerHTML = "<option>Error accessing cameras</option>";
+      }
+    }
+
+    async function startCamera(deviceId) {
+      if (currentStream) {
+        currentStream.getTracks().forEach((t) => t.stop());
+        currentStream = null;
+      }
+      try {
+        const constraints = {
+          video: {
+            deviceId: { exact: deviceId },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+        };
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+        videoEl.srcObject = currentStream;
+
+        const track = currentStream.getVideoTracks()[0];
+        console.log("[Camera settings]", track.getSettings());
+
+        await videoEl.play();
+
+        if (videoEl.readyState >= 2) {
+          updateVideoDisplay();
+        } else {
+          videoEl.addEventListener("loadedmetadata", updateVideoDisplay, { once: true });
+        }
+      } catch (err) {
+        console.error("Error starting camera:", err);
+      }
+    }
+
+    function updateVideoDisplay() {
+      const videoWidth = videoEl.videoWidth;
+      const videoHeight = videoEl.videoHeight;
+      console.log("[Video] dimensions:", videoWidth, "x", videoHeight);
+
+      if (!renderer.xr.isPresenting) return;
+
+      const xrCam = renderer.xr.getCamera();
+      const leftEyeCam = xrCam.cameras[0];
+      const proj = leftEyeCam.projectionMatrix.elements;
+
+      const fovX = 2 * Math.atan(1 / proj[0]);
+      const fovY = 2 * Math.atan(1 / proj[5]);
+
+      panelDistance = 1.5;
+      bigPanelWidth = 2 * panelDistance * Math.tan(fovX / 2);
+      bigPanelHeight = 2 * panelDistance * Math.tan(fovY / 2);
+
+      bigPanelMesh.geometry.dispose();
+      bigPanelMesh.geometry = new THREE.PlaneGeometry(bigPanelWidth, bigPanelHeight);
+      bigPanelMesh.position.set(0, 0, -panelDistance);
+
+      const smallScale = 0.15;
+      const smallWidth = bigPanelWidth * smallScale;
+      const smallHeight = bigPanelHeight * smallScale;
+      smallPanelMesh.geometry.dispose();
+      smallPanelMesh.geometry = new THREE.PlaneGeometry(smallWidth, smallHeight);
+      // Note: we do NOT reposition here; we want world-locked once we set it in sessionstart
+    }
+
+    async function onXRSessionStart() {
+      console.log("[XR] sessionstart");
+
+      xrSession = renderer.xr.getSession();
+      viewerSpace = await xrSession.requestReferenceSpace("viewer");
+      localSpace = await xrSession.requestReferenceSpace("local-floor")
+        .catch(() => xrSession.requestReferenceSpace("local"));
+      hitTestSource = null;
+      lastRay = null;
+      hasLastRayDirWorld = false;
+
+      // Place small panel ONCE in world space in front of the user
+      const xrCam = renderer.xr.getCamera();
+      const camPos = new THREE.Vector3();
+      const camQuat = new THREE.Quaternion();
+      camPos.setFromMatrixPosition(xrCam.matrixWorld);
+      xrCam.getWorldQuaternion(camQuat);
+
+      const offsetLocal = new THREE.Vector3(0, -0.3, -1.0); // 1m forward, 0.3m down
+      offsetLocal.applyQuaternion(camQuat).add(camPos);
+
+      smallPanelMesh.position.copy(offsetLocal);
+      smallPanelMesh.quaternion.copy(camQuat);
+      smallPanelMesh.updateMatrix();
+
+      const deviceId = cameraSelect.value;
+      if (deviceId) await startCamera(deviceId);
+    }
+
+    function onXRSessionEnd() {
+      console.log("[XR] sessionend");
+
+      if (hitTestSource) {
+        hitTestSource.cancel();
+        hitTestSource = null;
+      }
+      lastRay = null;
+      hasLastRayDirWorld = false;
+      xrSession = null;
+      viewerSpace = null;
+      localSpace = null;
+      reticle.visible = false;
+
+      if (currentStream) {
+        currentStream.getTracks().forEach((t) => t.stop());
+        currentStream = null;
+      }
+    }
+
+    function onWindowResize() {
+      nonXRCamera.aspect = window.innerWidth / window.innerHeight;
+      nonXRCamera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+      renderer.setAnimationLoop(render);
+    }
+
+    function render(time, frame) {
+      if (renderer.xr.isPresenting) {
+        const xrCam = renderer.xr.getCamera();
+        // Head-locked group (big panel) follows head
+        headLockedGroup.position.copy(xrCam.position);
+        headLockedGroup.quaternion.copy(xrCam.quaternion);
+
+        // World-locked small panel stays put; we only raycast against it
+
+        if (smallPanelMesh && controllerRight && xrSession && viewerSpace && localSpace) {
+          tempMatrix.identity().extractRotation(controllerRight.matrixWorld);
+          raycaster.ray.origin.setFromMatrixPosition(controllerRight.matrixWorld);
+          raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+          const hits = raycaster.intersectObject(smallPanelMesh, false);
+
+          if (hits.length > 0) {
+            const hit = hits[0];
+
+            panelHoverMarker.position.copy(hit.point);
+            smallPanelMesh.worldToLocal(panelHoverMarker.position);
+            panelHoverMarker.visible = true;
+
+            const uSmall = hit.uv.x;
+            const vSmall = hit.uv.y;
+
+            const uBig = uSmall;
+            const vBig = vSmall;
+
+            const uCentered = (uBig - 0.5) + CAL_U_OFFSET;
+            const vCentered = (vBig - 0.5) + CAL_V_OFFSET;
+
+            const xLocal = uCentered * CAL_HFOV * bigPanelWidth;
+            const yLocal = -vCentered * CAL_VFOV * bigPanelHeight;
+            _bigLocalPoint.set(xLocal, yLocal, 0);
+
+            _bigWorldPoint.copy(_bigLocalPoint);
+            bigPanelMesh.localToWorld(_bigWorldPoint);
+
+            _camWorldPos.setFromMatrixPosition(xrCam.matrixWorld);
+
+            _dirWorld.copy(_bigWorldPoint).sub(_camWorldPos).normalize();
+            lastRayDirWorld.copy(_dirWorld);
+            hasLastRayDirWorld = true;
+
+            xrCam.getWorldQuaternion(_viewerQuat);
+            _viewerQuat.invert();
+            _dirViewer.copy(_dirWorld).applyQuaternion(_viewerQuat);
+
+            const origin = { x: 0, y: 0, z: 0 };
+            const direction = {
+              x: _dirViewer.x,
+              y: _dirViewer.y,
+              z: _dirViewer.z,
+            };
+
+            const dirChanged =
+              !lastRay ||
+              Math.abs(lastRay.direction.x - direction.x) > 1e-3 ||
+              Math.abs(lastRay.direction.y - direction.y) > 1e-3 ||
+              Math.abs(lastRay.direction.z - direction.z) > 1e-3;
+
+            if (dirChanged) {
+              lastRay = { origin, direction };
+              if (hitTestSource) {
+                hitTestSource.cancel();
+                hitTestSource = null;
+              }
+              try {
+                const ray = new XRRay(origin, direction);
+                xrSession.requestHitTestSource({
+                  space: viewerSpace,
+                  offsetRay: ray,
+                }).then((source) => {
+                  hitTestSource = source;
+                }).catch((err) => {
+                  console.warn("requestHitTestSource failed:", err);
+                });
+              } catch (e) {
+                console.warn("XRRay or hit-test not supported:", e);
+              }
+            }
+
+            const distToBigPanelPoint = _camWorldPos.distanceTo(_bigWorldPoint);
+            console.log(
+              "[Small panel hit]",
+              "uvSmall=", uSmall.toFixed(3), vSmall.toFixed(3),
+              "uvBig=", uBig.toFixed(3), vBig.toFixed(3),
+              "bigWorld=", _bigWorldPoint.x.toFixed(3),
+              _bigWorldPoint.y.toFixed(3),
+              _bigWorldPoint.z.toFixed(3),
+              "distToBigPanelPoint=", distToBigPanelPoint.toFixed(3)
+            );
+          } else {
+            panelHoverMarker.visible = false;
+            reticle.visible = false;
+            if (hitTestSource) {
+              hitTestSource.cancel();
+              hitTestSource = null;
+            }
+            lastRay = null;
+            hasLastRayDirWorld = false;
+          }
+        }
+
+        if (frame && hitTestSource && localSpace) {
+          const hitResults = frame.getHitTestResults(hitTestSource);
+          if (hitResults.length > 0) {
+            const hit = hitResults[0];
+            const pose = hit.getPose(localSpace);
+            if (pose) {
+              reticle.matrix.fromArray(pose.transform.matrix);
+              reticle.visible = true;
+
+              _hitPos.setFromMatrixPosition(reticle.matrix);
+              _camPosForHit.setFromMatrixPosition(xrCam.matrixWorld);
+              const hitDistance = _camPosForHit.distanceTo(_hitPos);
+
+              let angleDeg = null;
+              if (hasLastRayDirWorld) {
+                const dirToHit = _hitPos.clone().sub(_camPosForHit).normalize();
+                const dot = THREE.MathUtils.clamp(lastRayDirWorld.dot(dirToHit), -1, 1);
+                angleDeg = THREE.MathUtils.radToDeg(Math.acos(dot));
+              }
+              console.log(
+                "[Hit-test]",
+                "hitDistance=", hitDistance.toFixed(3),
+                "angleBetweenExpectedRayAndHitDir=",
+                angleDeg !== null ? angleDeg.toFixed(2) + "deg" : "n/a"
+              );
+            } else {
+              reticle.visible = false;
+            }
+          } else {
+            if (hasLastRayDirWorld) {
+              console.log("[Hit-test] No results for current ray.");
+            }
+            reticle.visible = false;
+          }
+        }
+      }
+
+      renderer.render(scene, nonXRCamera);
+    }
+  </script>
+</body>
+</html>
